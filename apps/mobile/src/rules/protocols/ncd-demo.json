@@ -1,0 +1,23 @@
+{
+  "protocol": "ncd_demo_v1",
+  "version": "1.0",
+  "bp": {
+    "high_reading_rule": {
+      "enabled": true,
+      "systolic_threshold": 140,
+      "diastolic_threshold": 90,
+      "source": "National NCD Screening Protocol (Community Guidelines)",
+      "reason": "ब्लड प्रेशर अनुशंसित स्क्रीनिंग सीमा (140/90) से अधिक दर्ज किया गया।",
+      "nextWorkflow": "रीडिंग दोबारा सत्यापित करें और निर्धारित स्वास्थ्य केंद्र (PHC/CHC) रेफरल/फॉलो-अप प्रक्रिया का पालन करें।"
+    }
+  },
+  "glucose": {
+    "high_reading_rule": {
+      "enabled": true,
+      "glucose_threshold": 200,
+      "source": "National NCD Screening Protocol (Diabetes Guidelines)",
+      "reason": "ब्लड शुगर अनुशंसित सीमा (200 mg/dL) से अधिक पाई गई।",
+      "nextWorkflow": "शुगर जांच की पुष्टि करें और चिकित्सा अधिकारी के पास परामर्श हेतु भेजें।"
+    }
+  }
+}

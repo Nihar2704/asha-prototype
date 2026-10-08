@@ -1,0 +1,8 @@
+{
+  "name": "cactus-expo",
+  "platforms": ["android", "ios"],
+  "android": {
+    "package": "expo.modules.cactus",
+    "modules": ["expo.modules.cactus.CactusModule"]
+  }
+}

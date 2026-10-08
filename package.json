@@ -1,0 +1,24 @@
+{
+  "name": "asha-ai-copilot",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "jest --config apps/mobile/jest.config.js",
+    "test:models": "python tools/ai_testbench/test_pipeline.py",
+    "test:interactive": "python tools/ai_testbench/interactive_test.py",
+    "test:mic": "python tools/ai_testbench/live_mic_test.py",
+    "test:studio": "python tools/ai_testbench/web_mic_studio.py",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.4",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.14",
+    "typescript": "^5.9.3"
+  }
+}
