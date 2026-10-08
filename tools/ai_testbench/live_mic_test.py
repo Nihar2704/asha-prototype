@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-ASHA AI Copilot - Live Microphone Field Tester (High-Accuracy Hindi Engine)
-Records real Hindi audio from your microphone, applies gain normalization,
-transcribes using Whisper Small with ASHA vocabulary prompt conditioning and beam search.
+ASHA AI Copilot - Live Microphone Field Tester
+Runs the official PRD STT model: collabora/whisper-tiny-hindi
+Records 16kHz audio from your microphone, runs collabora/whisper-tiny-hindi,
+extracts clinical screening fields, and evaluates deterministic protocol rules.
 """
 
 import os
@@ -11,7 +12,7 @@ import time
 import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wavfile
-from faster_whisper import WhisperModel
+from transformers import pipeline
 from test_pipeline import extract_ncd_fields, evaluate_ncd_rules
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -19,13 +20,6 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 SAMPLE_RATE = 16000  # 16 kHz mono PCM (PRD §8.1)
 TEMP_WAV = ".temp_mic_recording.wav"
-
-# Medical Context Prompt for Whisper conditioning
-HINDI_MEDICAL_PROMPT = (
-    "यह आशा (ASHA) कार्यकर्ता की ग्रामीण स्वास्थ्य जांच है। "
-    "मरीज का नाम, बीपी, ब्लड प्रेशर, सिस्टोलिक, डायस्टोलिक, शुगर, ग्लूकोज, रक्तचाप, 160/100, 140/90, 120/80, 210, 95, "
-    "गर्भवती, प्रसव, सप्ताह, माह, रक्तस्राव, ब्लीडिंग, सिरदर्द, पेट दर्द, सूजन, बुखार, दवाई नहीं ली।"
-)
 
 def record_audio(duration_seconds: int = 7) -> str:
     print(f"\n🎙 RECORDING LIVE AUDIO for {duration_seconds} seconds...")
@@ -45,7 +39,7 @@ def record_audio(duration_seconds: int = 7) -> str:
 
     audio_data = np.concatenate(frames, axis=0)
     
-    # Audio Gain Normalization (boosts quiet voice input without clipping)
+    # Audio Gain Normalization
     max_val = np.max(np.abs(audio_data))
     if max_val > 0 and max_val < 15000:
         gain = 15000.0 / max_val
@@ -55,26 +49,21 @@ def record_audio(duration_seconds: int = 7) -> str:
     return TEMP_WAV
 
 def transcribe_and_evaluate(wav_path: str):
-    print("\n[Step 1] Loading Whisper Small Hindi model (int8 CPU)...")
+    print("\n[Step 1] Loading official PRD model: collabora/whisper-tiny-hindi...")
     start_t = time.time()
     
-    # Using Whisper Small for dramatically higher accuracy on Indian dialects and numbers
-    model = WhisperModel("small", device="cpu", compute_type="int8")
-    
-    print("[Step 2] Transcribing with Devanagari vocabulary conditioning & beam search...")
-    segments, info = model.transcribe(
-        wav_path,
-        language="hi",
-        initial_prompt=HINDI_MEDICAL_PROMPT,
-        beam_size=5,
-        best_of=5,
-        temperature=0.0,
-        condition_on_previous_text=False,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=400)
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model="collabora/whisper-tiny-hindi",
+        device="cpu"
     )
     
-    transcript = " ".join([segment.text for segment in segments]).strip()
+    print("[Step 2] Transcribing 16kHz audio with collabora/whisper-tiny-hindi...")
+    result = pipe(
+        wav_path,
+        generate_kwargs={"language": "hindi", "task": "transcribe"}
+    )
+    transcript = result.get("text", "").strip()
     stt_duration = time.time() - start_t
 
     # Immediate audio cleanup per PRD §17.2
@@ -82,9 +71,9 @@ def transcribe_and_evaluate(wav_path: str):
         os.remove(wav_path)
 
     print("-" * 65)
-    print("🎯 LOCAL SPEECH-TO-TEXT RESULT:")
+    print("🎯 OFFICIAL PRD STT RESULT (collabora/whisper-tiny-hindi):")
     print(f"Transcript: \"{transcript if transcript else '[No speech detected]'}\"")
-    print(f"Latency: {stt_duration:.2f}s | Language: {info.language} ({info.language_probability*100:.1f}%)")
+    print(f"Latency: {stt_duration:.2f} seconds | Model: collabora/whisper-tiny-hindi")
     print("-" * 65)
 
     if not transcript:
@@ -148,7 +137,7 @@ if __name__ == "__main__":
         duration = int(sys.argv[1])
         
     print("=" * 65)
-    print("  ASHA AI COPILOT - LIVE MICROPHONE TEST (WHISPER SMALL)")
+    print(" ASHA AI COPILOT - LIVE MIC TEST (collabora/whisper-tiny-hindi)")
     print("=" * 65)
     input(f"Ready? Press [Enter] to start {duration}-second recording...")
     wav_file = record_audio(duration)

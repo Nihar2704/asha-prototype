@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
 ASHA AI Copilot - High-Efficiency Voice Studio (Enhanced Hindi Speech Recognition)
-Features:
-- Whisper Small Hindi model with int8 quantization
-- Vocabulary Prompt Conditioning for ASHA medical terminology (BP, Sugar, Glucose, Pregnancy)
-- Beam Search (beam_size=5) for maximum transcription accuracy
-- Dual-Mode Real-Time Speech Recognition (Browser Web Speech API + High-Fidelity Local Whisper)
-- Human-in-the-loop review and edit before rule evaluation
+Supports:
+- collabora/whisper-tiny-hindi (Official PRD Model: Fine-tuned Hindi STT)
+- faster-whisper-small (High accuracy 244M model)
+- faster-whisper-base (Fast 74M model)
+- Dual-Mode Real-Time Speech Feedback (Browser Web Speech API + Local Whisper)
+- Deterministic Protocol Rule Engine & Human-in-the-Loop Review
 """
 
 import os
+import sys
 import time
 import tempfile
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from faster_whisper import WhisperModel
+from transformers import pipeline
 from test_pipeline import extract_ncd_fields, evaluate_ncd_rules
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 app = FastAPI(title="ASHA AI Copilot - High-Efficiency Voice Studio")
 
@@ -27,28 +32,35 @@ HINDI_MEDICAL_PROMPT = (
     "गर्भवती, प्रसव, सप्ताह, माह, रक्तस्राव, ब्लीडिंग, सिरदर्द, पेट दर्द, सूजन, बुखार, दवाई नहीं ली।"
 )
 
-# Global Whisper instance loaded on demand
-whisper_model = None
-CURRENT_MODEL_SIZE = "small"  # Upgraded from 'tiny' for superior Hindi accuracy
+# Global model instances cached in memory
+cached_models = {}
 
-def get_whisper(model_size: str = "small"):
-    global whisper_model, CURRENT_MODEL_SIZE
-    if whisper_model is None or CURRENT_MODEL_SIZE != model_size:
-        print(f"[Voice Studio] Loading Whisper '{model_size}' model for high-accuracy Hindi...")
-        try:
-            whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
-            CURRENT_MODEL_SIZE = model_size
-        except Exception as e:
-            print(f"[Voice Studio] Fallback to 'base' model due to: {e}")
-            whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-            CURRENT_MODEL_SIZE = "base"
-    return whisper_model
+def get_transcriber(model_choice: str = "collabora"):
+    if model_choice in cached_models:
+        return cached_models[model_choice]
+
+    print(f"\n[Voice Studio] Initializing engine: '{model_choice}'...")
+
+    if model_choice == "collabora":
+        # Official PRD Model: collabora/whisper-tiny-hindi
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model="collabora/whisper-tiny-hindi",
+            device="cpu"
+        )
+        cached_models["collabora"] = ("transformers", pipe)
+        return cached_models["collabora"]
+    else:
+        # Faster-whisper small or base
+        model = WhisperModel(model_choice, device="cpu", compute_type="int8")
+        cached_models[model_choice] = ("faster_whisper", model)
+        return cached_models[model_choice]
 
 @app.post("/api/process_audio")
 async def process_audio(
     audio: UploadFile = File(...),
     manual_transcript: str = Form(None),
-    model_size: str = Form("small")
+    model_size: str = Form("collabora")
 ):
     start_time = time.time()
     transcript = manual_transcript
@@ -62,36 +74,44 @@ async def process_audio(
             temp_audio.write(content)
 
         try:
-            model = get_whisper(model_size)
-            # High accuracy parameters: initial_prompt + beam search (beam_size=5)
-            segments, info = model.transcribe(
-                temp_path,
-                language="hi",
-                initial_prompt=HINDI_MEDICAL_PROMPT,
-                beam_size=5,
-                best_of=5,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=400)
-            )
-            transcript = " ".join([s.text for s in segments]).strip()
+            engine_type, model_obj = get_transcriber(model_size)
+
+            if engine_type == "transformers":
+                # Using collabora/whisper-tiny-hindi pipeline
+                result = model_obj(
+                    temp_path,
+                    generate_kwargs={
+                        "language": "hindi",
+                        "task": "transcribe"
+                    }
+                )
+                transcript = result.get("text", "").strip()
+            else:
+                # Using faster-whisper with beam search & prompt conditioning
+                segments, info = model_obj.transcribe(
+                    temp_path,
+                    language="hi",
+                    initial_prompt=HINDI_MEDICAL_PROMPT,
+                    beam_size=5,
+                    best_of=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=400)
+                )
+                transcript = " ".join([s.text for s in segments]).strip()
         finally:
-            # PRD §17.2: Delete raw audio immediately
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
     latency = round(time.time() - start_time, 2)
-
-    # Process extraction & rules on the resulting transcript
-    return evaluate_screening_transcript(transcript, latency)
+    return evaluate_screening_transcript(transcript, latency, model_size)
 
 @app.post("/api/evaluate_text")
 async def evaluate_text(transcript: str = Form(...)):
-    return evaluate_screening_transcript(transcript, latency=0.01)
+    return evaluate_screening_transcript(transcript, latency=0.01, model_used="manual")
 
-def evaluate_screening_transcript(transcript: str, latency: float):
-    # Detect screening type
+def evaluate_screening_transcript(transcript: str, latency: float, model_used: str):
     is_pregnancy = "गर्भवती" in transcript or ("महीने" in transcript and ("रक्तस्राव" in transcript or "सिरदर्द" in transcript))
     
     if is_pregnancy:
@@ -102,6 +122,7 @@ def evaluate_screening_transcript(transcript: str, latency: float):
 
         return {
             "transcript": transcript or "कोई आवाज नहीं सुनी गई (No speech detected)",
+            "model_used": model_used,
             "screening_type": "PREGNANCY",
             "latency_seconds": latency,
             "fields": {
@@ -135,6 +156,7 @@ def evaluate_screening_transcript(transcript: str, latency: float):
 
         return {
             "transcript": transcript or "कोई आवाज नहीं सुनी गई (No speech detected)",
+            "model_used": model_used,
             "screening_type": "NCD",
             "latency_seconds": latency,
             "fields": {
@@ -156,7 +178,7 @@ async def get_index():
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ASHA AI Copilot - High-Efficiency Voice Studio</title>
+  <title>ASHA AI Copilot - Live Voice Studio</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&family=Noto+Sans+Devanagari:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -230,12 +252,17 @@ async def get_index():
       text-align: left;
     }
     .model-selector {
-      margin-top: 14px;
+      margin-top: 16px;
       display: flex;
       justify-content: center;
+      align-items: center;
       gap: 12px;
       font-size: 13px;
       color: #8b949e;
+      background: #090d16;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #28303d;
     }
     .preset-hint {
       background: #090d16;
@@ -308,9 +335,9 @@ async def get_index():
 </head>
 <body>
   <div class="container">
-    <span class="badge">Whisper Small (Prompt Conditioned) + Needle 2</span>
-    <h1>ASHA AI Copilot - High-Efficiency Voice Studio</h1>
-    <p class="subtitle">Real-Time Hindi Audio Capture $\rightarrow$ Whisper Small STT $\rightarrow$ Needle 2 $\rightarrow$ Protocol Rules</p>
+    <span class="badge">PRD Architecture: On-Device Voice AI</span>
+    <h1>ASHA AI Copilot - Voice Studio</h1>
+    <p class="subtitle">Microphone $\rightarrow$ Whisper Hindi STT $\rightarrow$ Needle 2 Extraction $\rightarrow$ Deterministic Rules</p>
 
     <div class="card mic-section">
       <button id="micBtn" class="mic-btn" onclick="toggleRecording()">🎙</button>
@@ -323,16 +350,16 @@ async def get_index():
       </div>
 
       <div class="model-selector">
-        <label>Engine: 
-          <select id="modelSelect" style="background:#090d16; color:#e6edf3; border:1px solid #30363d; padding:3px 8px; border-radius:6px;">
-            <option value="small" selected>Whisper Small (High Hindi Accuracy - Recommended)</option>
-            <option value="base">Whisper Base (Fastest)</option>
-          </select>
-        </label>
+        <label for="modelSelect"><strong>Active STT Engine:</strong></label>
+        <select id="modelSelect" style="background:#131923; color:#58a6ff; font-weight:600; border:1px solid #30363d; padding:6px 12px; border-radius:6px;">
+          <option value="collabora" selected>🌟 collabora/whisper-tiny-hindi (Official PRD Model)</option>
+          <option value="small">⚡ Whisper Small (244M High-Accuracy)</option>
+          <option value="base">🚀 Whisper Base (74M)</option>
+        </select>
       </div>
 
       <div class="preset-hint">
-        💡 <strong>Quick Hindi Test Phrases (Click to load):</strong><br>
+        💡 <strong>Quick Test Phrases (Click to load):</strong><br>
         • <button class="preset-btn" onclick="loadPreset('इनका नाम सुनीता देवी है, उम्र पैंतालीस साल है। बीपी एक सौ साठ बटा एक सौ है और शुगर दो सौ दस आई थी।')">Sunita Devi (High BP 160/100, Sugar 210)</button><br>
         • <button class="preset-btn" onclick="loadPreset('मरीज का नाम रमेश कुमार है, बीपी 120/80 है और शुगर 95 है।')">Ramesh Kumar (Normal 120/80)</button><br>
         • <button class="preset-btn" onclick="loadPreset('महिला अनीता वर्मा 7 महीने की गर्भवती हैं, तेज सिरदर्द और योनि से रक्तस्राव हो रहा है।')">Anita Verma (Maternal Danger Signs)</button>
@@ -346,7 +373,7 @@ async def get_index():
       </div>
 
       <p style="font-size: 13px; color: #8b949e; margin-top: 10px;">
-        ✏️ <strong>Human-in-the-Loop Review:</strong> (You can correct or edit any word below and click "Re-evaluate"):
+        ✏️ <strong>Human-in-the-Loop Review:</strong> (You can correct any word below and click "Re-evaluate"):
       </p>
       <textarea id="transcriptInput" class="edit-area" rows="3"></textarea>
       <button class="re-eval-btn" onclick="reEvaluateTranscript()">🔄 Re-evaluate Rules</button>
@@ -372,11 +399,11 @@ async def get_index():
     let webSpeechRecognizer = null;
     let liveFinalText = "";
 
-    // Initialize browser Web Speech API for real-time live feedback while speaking
+    // Browser Web Speech API for real-time live preview while speaking
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       webSpeechRecognizer = new SpeechRecognition();
-      webSpeechRecognizer.lang = 'hi-IN'; // Hindi India
+      webSpeechRecognizer.lang = 'hi-IN';
       webSpeechRecognizer.continuous = true;
       webSpeechRecognizer.interimResults = true;
 
@@ -413,7 +440,7 @@ async def get_index():
           mediaRecorder = new MediaRecorder(stream);
           mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
           mediaRecorder.onstop = uploadAudio;
-          mediaRecorder.start(250); // Slice every 250ms
+          mediaRecorder.start(250);
 
           liveFinalText = "";
           document.getElementById('liveSpeechText').innerText = "Listening to Hindi...";
@@ -426,7 +453,8 @@ async def get_index():
           isRecording = true;
           btn.classList.add('recording');
           btn.innerText = '⏹';
-          status.innerText = 'Recording from microphone... Speak naturally in Hindi!';
+          const modelName = document.getElementById('modelSelect').value;
+          status.innerText = `Recording... Speak naturally in Hindi! (Target: ${modelName})`;
           seconds = 0;
           timer.innerText = '00:00';
           timerInterval = setInterval(() => {
@@ -445,7 +473,7 @@ async def get_index():
         mediaRecorder.stop();
         btn.classList.remove('recording');
         btn.innerText = '🎙';
-        status.innerText = 'Processing audio locally with Whisper Small Hindi (beam_size=5)...';
+        status.innerText = 'Transcribing with ' + document.getElementById('modelSelect').value + '...';
       }
     }
 
@@ -454,12 +482,6 @@ async def get_index():
       const formData = new FormData();
       formData.append('audio', audioBlob, 'recording.webm');
       formData.append('model_size', document.getElementById('modelSelect').value);
-
-      // If browser live recognition caught high confidence text, pass as reference
-      const liveCaught = (liveFinalText || document.getElementById('liveSpeechText').innerText).trim();
-      if (liveCaught && !liveCaught.includes("Listening")) {
-        formData.append('live_hint', liveCaught);
-      }
 
       try {
         const res = await fetch('/api/process_audio', { method: 'POST', body: formData });
@@ -494,7 +516,7 @@ async def get_index():
 
     function displayResults(data) {
       document.getElementById('resultBox').style.display = 'block';
-      document.getElementById('latencyBadge').innerText = '⏱ ' + data.latency_seconds + 's latency';
+      document.getElementById('latencyBadge').innerText = `Engine: ${data.model_used} | ⏱ ${data.latency_seconds}s`;
       document.getElementById('transcriptInput').value = data.transcript;
 
       const priorityDiv = document.getElementById('priorityDisplay');
@@ -518,10 +540,10 @@ async def get_index():
 
 if __name__ == "__main__":
     print("\n" + "=" * 65)
-    print("  ASHA AI COPILOT - HIGH-ACCURACY VOICE STUDIO")
+    print("  ASHA AI COPILOT - VOICE STUDIO (PRD MODEL ACTIVATED)")
     print("=" * 65)
-    print("  Engine: Whisper Small (Int8) + Beam Search (beam_size=5)")
-    print("  Prompt Conditioning: ASHA Healthcare Devanagari Lexicon")
+    print("  Default STT: collabora/whisper-tiny-hindi (Official PRD Model)")
+    print("  Alternative: faster-whisper-small (244M)")
     print("  URL: http://localhost:8000")
     print("=" * 65 + "\n")
     uvicorn.run(app, host="127.0.0.1", port=8000)
